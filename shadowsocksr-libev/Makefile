@@ -14,6 +14,7 @@ PKG_LICENSE_FILES:=LICENSE
 PKG_USE_MIPS16:=0
 PKG_BUILD_FLAGS:=no-mips16
 PKG_BUILD_PARALLEL:=1
+PKG_FIXUP:=autoreconf
 PKG_INSTALL:=1
 
 include $(INCLUDE_DIR)/package.mk
@@ -34,7 +35,7 @@ define Package/shadowsocksr-libev/Default
   endef
 endef
 
-SHADOWSOCKSR_COMPONENTS:=local nat redir server
+SHADOWSOCKSR_COMPONENTS:=local nat redir
 define shadowsocksr-libev/templates
   $(foreach component,$(SHADOWSOCKSR_COMPONENTS),
     $(call Package/shadowsocksr-libev/Default,$(component))
