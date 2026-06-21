@@ -1,5 +1,6 @@
 #!/usr/bin/lua
 
+require "nixio"
 require "nixio.fs"
 require "luci.model.uci"
 
@@ -602,6 +603,67 @@ local function split_alpn(value)
 	return items
 end
 
+local function parse_wireguard_reserved(sid)
+	local raw = get_server_field(sid, "reserved", nil)
+	local values = {}
+	local bytes = {}
+
+	if raw == nil or raw == "" then
+		return nil
+	end
+	if type(raw) == "table" then
+		values = raw
+	else
+		values = { raw }
+	end
+	for _, item in ipairs(values) do
+		local text = tostring(item or "")
+		if text ~= "" then
+			if not text:match("[^%d,]+") then
+				for byte in text:gmatch("%d+") do
+					bytes[#bytes + 1] = tonumber(byte)
+				end
+			else
+				local decoded = nixio.bin.b64decode(text)
+				if decoded then
+					for i = 1, #decoded do
+						bytes[#bytes + 1] = decoded:byte(i)
+					end
+				end
+			end
+		end
+	end
+	return #bytes > 0 and bytes or nil
+end
+
+local function split_local_addresses(value)
+	local items = {}
+	if type(value) == "table" then
+		for _, item in ipairs(value) do
+			if item and item ~= "" then
+				items[#items + 1] = tostring(item)
+			end
+		end
+	elseif value and value ~= "" then
+		for item in tostring(value):gmatch("[^,%s]+") do
+			items[#items + 1] = item
+		end
+	end
+	return items
+end
+
+local function split_wireguard_addresses(value)
+	local ip, ipv6
+	for _, item in ipairs(split_local_addresses(value)) do
+		if item:find(":", 1, true) then
+			ipv6 = ipv6 or item
+		else
+			ip = ip or item
+		end
+	end
+	return ip, ipv6
+end
+
 local function apply_v2ray_tls_options(proxy, sid)
 	local tls = get_server_field(sid, "tls", "0")
 	local reality = get_server_field(sid, "reality", "0")
@@ -700,6 +762,23 @@ local function apply_v2ray_transport_options(proxy, sid)
 	end
 end
 
+local function can_mihomo_handle_v2ray_transport(protocol, sid)
+	local transport = get_server_field(sid, "transport", "raw")
+	if transport == "" or transport == "raw" or transport == "tcp" then
+		if get_server_field(sid, "tcp_guise", "none") == "http" then
+			return false
+		end
+		return true
+	end
+	if protocol == "socks" or protocol == "http" then
+		return false
+	end
+	if transport == "ws" or transport == "httpupgrade" or transport == "h2" or transport == "grpc" then
+		return true
+	end
+	return protocol == "vless" and transport == "xhttp"
+end
+
 local function build_v2ray_mihomo_proxy(sid)
 	local node_type = get_server_field(sid, "type", "")
 	local protocol = get_server_field(sid, "v2ray_protocol", "vmess")
@@ -718,6 +797,9 @@ local function build_v2ray_mihomo_proxy(sid)
 			proxy.password = string_or_nil(get_server_field(sid, "password", ""))
 		end
 	elseif protocol == "vmess" then
+		if not can_mihomo_handle_v2ray_transport(protocol, sid) then
+			return nil
+		end
 		proxy.type = "vmess"
 		proxy.uuid = first_nonempty(get_server_field(sid, "vmess_id", ""), get_server_field(sid, "vmess_uuid", "")) or ""
 		proxy.alterId = tonumber(get_server_field(sid, "alter_id", "0")) or 0
@@ -725,6 +807,9 @@ local function build_v2ray_mihomo_proxy(sid)
 		apply_v2ray_tls_options(proxy, sid)
 		apply_v2ray_transport_options(proxy, sid)
 	elseif protocol == "vless" then
+		if not can_mihomo_handle_v2ray_transport(protocol, sid) then
+			return nil
+		end
 		proxy.type = "vless"
 		proxy.uuid = get_server_field(sid, "vmess_id", "")
 		proxy.flow = string_or_nil(get_server_field(sid, "tls_flow", ""))
@@ -732,11 +817,17 @@ local function build_v2ray_mihomo_proxy(sid)
 		apply_v2ray_tls_options(proxy, sid)
 		apply_v2ray_transport_options(proxy, sid)
 	elseif protocol == "trojan" then
+		if not can_mihomo_handle_v2ray_transport(protocol, sid) then
+			return nil
+		end
 		proxy.type = "trojan"
 		proxy.password = get_server_field(sid, "password", "")
 		apply_trojan_tls_options(proxy, sid)
 		apply_v2ray_transport_options(proxy, sid)
 	elseif protocol == "shadowsocks" then
+		if not can_mihomo_handle_v2ray_transport(protocol, sid) then
+			return nil
+		end
 		proxy.type = "ss"
 		proxy.cipher = get_server_field(sid, "encrypt_method_ss", "none")
 		proxy.password = get_server_field(sid, "password", "")
@@ -758,11 +849,61 @@ local function build_v2ray_mihomo_proxy(sid)
 			proxy.obfs = string_or_nil(get_server_field(sid, "obfs_type", ""))
 			proxy["obfs-password"] = string_or_nil(get_server_field(sid, "salamander", ""))
 		end
+	elseif protocol == "socks" then
+		if not can_mihomo_handle_v2ray_transport(protocol, sid) then
+			return nil
+		end
+		proxy.type = "socks5"
+		if get_server_field(sid, "socks_ver", "5") ~= "5" then
+			return nil
+		end
+		if get_server_field(sid, "auth_enable", "0") == "1" then
+			proxy.username = string_or_nil(get_server_field(sid, "username", ""))
+			proxy.password = string_or_nil(get_server_field(sid, "password", ""))
+		end
+		apply_v2ray_tls_options(proxy, sid)
+	elseif protocol == "http" then
+		if not can_mihomo_handle_v2ray_transport(protocol, sid) then
+			return nil
+		end
+		proxy.type = "http"
+		if get_server_field(sid, "auth_enable", "0") == "1" then
+			proxy.username = string_or_nil(get_server_field(sid, "username", ""))
+			proxy.password = string_or_nil(get_server_field(sid, "password", ""))
+		end
+		apply_v2ray_tls_options(proxy, sid)
+	elseif protocol == "wireguard" then
+		local ip, ipv6 = split_wireguard_addresses(get_server_field(sid, "local_addresses", ""))
+		proxy.type = "wireguard"
+		proxy["private-key"] = get_server_field(sid, "private_key", "")
+		proxy["public-key"] = get_server_field(sid, "peer_pubkey", "")
+		proxy["pre-shared-key"] = string_or_nil(get_server_field(sid, "preshared_key", ""))
+		proxy.ip = ip
+		proxy.ipv6 = ipv6
+		proxy["allowed-ips"] = split_local_addresses(get_server_field(sid, "allowedips", "0.0.0.0/0"))
+		proxy.reserved = parse_wireguard_reserved(sid)
+		proxy["persistent-keepalive"] = number_or_nil(get_server_field(sid, "keepaliveperiod", ""))
+		proxy.mtu = number_or_nil(get_server_field(sid, "mtu", ""))
+	elseif protocol == "snell" then
+		proxy.type = "snell"
+		proxy.psk = get_server_field(sid, "snell_psk", "")
+		proxy.version = number_or_nil(get_server_field(sid, "snell_version", ""))
+		local obfs_mode = string_or_nil(get_server_field(sid, "snell_obfs", ""))
+		local obfs_host = string_or_nil(get_server_field(sid, "snell_obfs_host", ""))
+		if obfs_mode or obfs_host then
+			proxy["obfs-opts"] = {
+				mode = obfs_mode,
+				host = obfs_host
+			}
+		end
 	else
 		return nil
 	end
 
 	if not proxy.server or proxy.server == "" or not proxy.port or proxy.port == 0 then
+		return nil
+	end
+	if proxy.type == "snell" and (not proxy.psk or proxy.psk == "") then
 		return nil
 	end
 	return proxy
